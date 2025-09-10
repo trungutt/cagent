@@ -267,3 +267,33 @@ func (e *StreamStoppedEvent) GetAgentName() string {
 }
 
 func (e *StreamStoppedEvent) isEvent() {}
+
+type AuthorizationRequiredEvent struct {
+	Type                string `json:"type"`
+	Message             string `json:"message"`
+	AuthorizationServer string `json:"authorization_server"`
+	ServerURL           string `json:"server_url"`
+	AuthorizationURL    string `json:"authorization_url"`
+	ClientID            string `json:"client_id"`
+	RedirectURI         string `json:"redirect_uri"`
+	State               string `json:"state"`
+	CodeVerifier        string `json:"code_verifier,omitempty"` // Omit from JSON for security
+	AgentContext
+}
+
+func AuthorizationRequired(message, authorizationServer, serverURL, authorizationURL, clientID, redirectURI, state, codeVerifier, agentName string) Event {
+	return &AuthorizationRequiredEvent{
+		Type:                "authorization_required",
+		Message:             message,
+		AuthorizationServer: authorizationServer,
+		ServerURL:           serverURL,
+		AuthorizationURL:    authorizationURL,
+		ClientID:            clientID,
+		RedirectURI:         redirectURI,
+		State:               state,
+		CodeVerifier:        codeVerifier,
+		AgentContext:        AgentContext{AgentName: agentName},
+	}
+}
+
+func (e *AuthorizationRequiredEvent) isEvent() {}

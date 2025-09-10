@@ -31,8 +31,9 @@ func NewRemoteClient(url, transportType string, headers map[string]string) (*Cli
 
 	slog.Debug("Created remote MCP client successfully")
 	return &Client{
-		client:  c,
-		logType: "remote",
-		logId:   url,
+		client:    c,
+		logType:   "remote",
+		logId:     url,
+		serverURL: url,
 	}, nil
 }

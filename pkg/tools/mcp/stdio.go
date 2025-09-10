@@ -26,9 +26,10 @@ func NewStdioClient(command string, args, env []string) *Client {
 
 	slog.Debug("Created stdio MCP client successfully")
 	return &Client{
-		client:  c,
-		logType: "command",
-		logId:   command,
+		client:    c,
+		logType:   "command",
+		logId:     command,
+		serverURL: "", // stdio clients don't have server URLs
 	}
 }
 

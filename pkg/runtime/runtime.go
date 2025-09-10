@@ -17,6 +17,7 @@ import (
 	"github.com/docker/cagent/pkg/session"
 	"github.com/docker/cagent/pkg/team"
 	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/cagent/pkg/tools/mcp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -184,7 +185,23 @@ func (r *Runtime) RunStream(ctx context.Context, sess *session.Session) <-chan E
 				if telemetryClient := telemetry.FromContext(ctx); telemetryClient != nil {
 					telemetryClient.RecordError(ctx, err.Error())
 				}
-				events <- Error(fmt.Sprintf("failed to get tools: %v", err))
+				
+				// Check if this is an authorization error and handle specially
+				if authErr := r.extractAuthorizationError(err); authErr != nil {
+					events <- AuthorizationRequired(
+						authErr.Message,
+						authErr.AuthorizationServer,
+						authErr.ServerURL,
+						authErr.AuthorizationURL,
+						authErr.ClientID,
+						authErr.RedirectURI,
+						authErr.State,
+						authErr.CodeVerifier,
+						a.Name(),
+					)
+				} else {
+					events <- Error(fmt.Sprintf("failed to get tools: %v", err))
+				}
 				return
 			}
 			slog.Debug("Retrieved agent tools", "agent", a.Name(), "tool_count", len(agentTools))
@@ -859,4 +876,14 @@ func (r *Runtime) Summarize(ctx context.Context, sess *session.Session, events c
 	sess.Messages = append(sess.Messages, session.Item{Summary: summary})
 	slog.Debug("Generated session summary", "session_id", sess.ID, "summary_length", len(summary))
 	events <- SessionSummary(sess.ID, summary)
+}
+
+// extractAuthorizationError checks if the error chain contains an AuthorizationError
+// and returns it if found
+func (r *Runtime) extractAuthorizationError(err error) *mcp.AuthorizationError {
+	var authErr *mcp.AuthorizationError
+	if errors.As(err, &authErr) {
+		return authErr
+	}
+	return nil
 }

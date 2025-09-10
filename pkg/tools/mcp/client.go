@@ -2,10 +2,15 @@ package mcp
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -14,6 +19,101 @@ import (
 
 	"github.com/docker/cagent/pkg/tools"
 )
+
+// ProtectedResourceMetadata represents the OAuth 2.0 Protected Resource Metadata
+// as defined in RFC 8705 and MCP 2025-DRAFT-v2 specification
+type ProtectedResourceMetadata struct {
+	AuthorizationEndpoint string `json:"authorization_endpoint"`
+	RegistrationEndpoint  string `json:"registration_endpoint"`
+}
+
+// ClientRegistrationRequest represents the OAuth 2.0 Dynamic Client Registration request
+// as defined in RFC 7591
+type ClientRegistrationRequest struct {
+	RedirectURIs            []string `json:"redirect_uris"`
+	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method,omitempty"`
+	GrantTypes              []string `json:"grant_types,omitempty"`
+	ResponseTypes           []string `json:"response_types,omitempty"`
+	ClientName              string   `json:"client_name,omitempty"`
+	ClientURI               string   `json:"client_uri,omitempty"`
+	LogoURI                 string   `json:"logo_uri,omitempty"`
+	Scope                   string   `json:"scope,omitempty"`
+	Contacts                []string `json:"contacts,omitempty"`
+	TosURI                  string   `json:"tos_uri,omitempty"`
+	PolicyURI               string   `json:"policy_uri,omitempty"`
+	JwksURI                 string   `json:"jwks_uri,omitempty"`
+	SoftwareID              string   `json:"software_id,omitempty"`
+	SoftwareVersion         string   `json:"software_version,omitempty"`
+}
+
+// ClientRegistrationResponse represents the OAuth 2.0 Dynamic Client Registration response
+// as defined in RFC 7591
+type ClientRegistrationResponse struct {
+	ClientID                string   `json:"client_id"`
+	ClientSecret            string   `json:"client_secret,omitempty"`
+	RegistrationAccessToken string   `json:"registration_access_token,omitempty"`
+	RegistrationClientURI   string   `json:"registration_client_uri,omitempty"`
+	ClientIDIssuedAt        int64    `json:"client_id_issued_at,omitempty"`
+	ClientSecretExpiresAt   int64    `json:"client_secret_expires_at,omitempty"`
+	RedirectURIs            []string `json:"redirect_uris,omitempty"`
+	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method,omitempty"`
+	GrantTypes              []string `json:"grant_types,omitempty"`
+	ResponseTypes           []string `json:"response_types,omitempty"`
+	ClientName              string   `json:"client_name,omitempty"`
+	ClientURI               string   `json:"client_uri,omitempty"`
+	LogoURI                 string   `json:"logo_uri,omitempty"`
+	Scope                   string   `json:"scope,omitempty"`
+	Contacts                []string `json:"contacts,omitempty"`
+	TosURI                  string   `json:"tos_uri,omitempty"`
+	PolicyURI               string   `json:"policy_uri,omitempty"`
+	JwksURI                 string   `json:"jwks_uri,omitempty"`
+	SoftwareID              string   `json:"software_id,omitempty"`
+	SoftwareVersion         string   `json:"software_version,omitempty"`
+}
+
+// PKCEParams holds PKCE parameters for OAuth 2.0 authorization
+type PKCEParams struct {
+	CodeVerifier  string
+	CodeChallenge string
+	Method        string // S256
+}
+
+// AuthorizationURLParams holds all parameters needed to build a complete authorization URL
+type AuthorizationURLParams struct {
+	AuthorizationEndpoint string
+	ResponseType          string
+	ClientID              string
+	RedirectURI           string
+	CodeChallenge         string
+	CodeChallengeMethod   string
+	State                 string
+	Scope                 string
+}
+
+// AuthorizationError is a special error type that carries authorization server information
+// for 401 authentication errors
+type AuthorizationError struct {
+	Message             string
+	AuthorizationServer string
+	ServerURL           string
+	AuthorizationURL    string
+	ClientID            string
+	RedirectURI         string
+	CodeVerifier        string
+	State               string
+	OriginalError       error
+}
+
+func (e *AuthorizationError) Error() string {
+	if e.AuthorizationServer != "" {
+		return fmt.Sprintf("%s (authorization server: %s)", e.Message, e.AuthorizationServer)
+	}
+	return e.Message
+}
+
+func (e *AuthorizationError) Unwrap() error {
+	return e.OriginalError
+}
 
 type mcpClient interface {
 	Start(ctx context.Context) error
@@ -30,10 +130,11 @@ type mcpClient interface {
 
 // Client implements an MCP client for interacting with MCP servers
 type Client struct {
-	client  mcpClient
-	tools   []tools.Tool
-	logType string
-	logId   string
+	client    mcpClient
+	tools     []tools.Tool
+	logType   string
+	logId     string
+	serverURL string
 }
 
 // Start initializes and starts the MCP server connection
@@ -42,6 +143,12 @@ func (c *Client) Start(ctx context.Context) error {
 
 	if err := c.client.Start(ctx); err != nil {
 		slog.Error("Failed to start MCP client", "error", err)
+
+		// Handle authorization errors by returning special AuthorizationError
+		if authErr := c.createAuthorizationError(ctx, err); authErr != nil {
+			return authErr
+		}
+
 		return fmt.Errorf("failed to start MCP client: %w", err)
 	}
 
@@ -236,4 +343,303 @@ func (c *Client) CallToolWithArgs(ctx context.Context, toolName string, args any
 	}
 
 	return c.CallTool(ctx, toolCall)
+}
+
+// is401Error checks if the error indicates a 401 Unauthorized response
+func is401Error(err error) bool {
+	if err == nil {
+		return false
+	}
+	errMsg := strings.ToLower(err.Error())
+	return strings.Contains(errMsg, "401") ||
+		strings.Contains(errMsg, "unauthorized") ||
+		strings.Contains(errMsg, "authentication")
+}
+
+// fetchProtectedResourceMetadata attempts to fetch OAuth 2.0 Protected Resource Metadata
+// from the server's well-known endpoint according to RFC 8705 and MCP 2025-DRAFT-v2
+func (c *Client) fetchProtectedResourceMetadata(ctx context.Context) (*ProtectedResourceMetadata, error) {
+	if c.serverURL == "" {
+		return nil, fmt.Errorf("server URL not available for metadata fetching")
+	}
+
+	serverURL, err := url.Parse(c.serverURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid server URL: %w", err)
+	}
+
+	// Construct the well-known OAuth protected resource metadata endpoint
+	metadataURL := &url.URL{
+		Scheme: serverURL.Scheme,
+		Host:   serverURL.Host,
+		Path:   "/.well-known/oauth-authorization-server",
+	}
+
+	slog.Debug("Fetching OAuth Protected Resource Metadata", "url", metadataURL.String())
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", metadataURL.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create metadata request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch metadata: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("metadata endpoint returned status %d", resp.StatusCode)
+	}
+
+	var metadata ProtectedResourceMetadata
+	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+		return nil, fmt.Errorf("failed to decode metadata response: %w", err)
+	}
+
+	return &metadata, nil
+}
+
+// createAuthorizationError processes 401 errors and returns an AuthorizationError with complete authorization URL
+func (c *Client) createAuthorizationError(ctx context.Context, originalErr error) *AuthorizationError {
+	if !is401Error(originalErr) {
+		return nil
+	}
+
+	slog.Debug("Detected 401 authorization error, starting OAuth 2.0 authorization flow")
+
+	// Step 1: Fetch OAuth Protected Resource Metadata
+	metadata, err := c.fetchProtectedResourceMetadata(ctx)
+	if err != nil {
+		slog.Debug("Failed to fetch OAuth metadata", "error", err)
+		return &AuthorizationError{
+			Message:       "Authentication required but no authorization server information available",
+			ServerURL:     c.serverURL,
+			OriginalError: originalErr,
+		}
+	}
+
+	if metadata.AuthorizationEndpoint == "" {
+		slog.Debug("No authorization endpoint found in metadata")
+		return &AuthorizationError{
+			Message:             "Authentication required but no authorization endpoint available",
+			AuthorizationServer: metadata.AuthorizationEndpoint,
+			ServerURL:           c.serverURL,
+			OriginalError:       originalErr,
+		}
+	}
+
+	// Step 2: Perform Dynamic Client Registration (if endpoint available)
+	var clientID, redirectURI string
+	if metadata.RegistrationEndpoint != "" {
+		slog.Debug("Performing dynamic client registration", "endpoint", metadata.RegistrationEndpoint)
+		registrationResp, err := c.performClientRegistration(ctx, metadata.RegistrationEndpoint)
+		if err != nil {
+			slog.Debug("Dynamic client registration failed", "error", err)
+			return &AuthorizationError{
+				Message:             "Authentication required but client registration failed",
+				AuthorizationServer: metadata.AuthorizationEndpoint,
+				ServerURL:           c.serverURL,
+				OriginalError:       originalErr,
+			}
+		}
+		clientID = registrationResp.ClientID
+		redirectURI = registrationResp.RedirectURIs[0] // Use the first registered redirect URI
+	} else {
+		slog.Debug("No registration endpoint available, using default values")
+		// Fallback to default values when dynamic registration is not available
+		clientID = "cagent-default-client"
+		redirectURI = "urn:ietf:wg:oauth:2.0:oob"
+	}
+
+	// Step 3: Generate PKCE parameters
+	pkceParams, err := generatePKCEParams()
+	if err != nil {
+		slog.Debug("Failed to generate PKCE parameters", "error", err)
+		return &AuthorizationError{
+			Message:             "Authentication required but failed to generate security parameters",
+			AuthorizationServer: metadata.AuthorizationEndpoint,
+			ServerURL:           c.serverURL,
+			OriginalError:       originalErr,
+		}
+	}
+
+	// Step 4: Generate state parameter
+	state, err := generateState()
+	if err != nil {
+		slog.Debug("Failed to generate state parameter", "error", err)
+		return &AuthorizationError{
+			Message:             "Authentication required but failed to generate security parameters",
+			AuthorizationServer: metadata.AuthorizationEndpoint,
+			ServerURL:           c.serverURL,
+			OriginalError:       originalErr,
+		}
+	}
+
+	// Step 5: Build complete authorization URL
+	authURLParams := &AuthorizationURLParams{
+		AuthorizationEndpoint: metadata.AuthorizationEndpoint,
+		ResponseType:          "code",
+		ClientID:              clientID,
+		RedirectURI:           redirectURI,
+		CodeChallenge:         pkceParams.CodeChallenge,
+		CodeChallengeMethod:   pkceParams.Method,
+		State:                 state,
+		Scope:                 "mcp",
+	}
+
+	authorizationURL, err := buildAuthorizationURL(authURLParams)
+	if err != nil {
+		slog.Debug("Failed to build authorization URL", "error", err)
+		return &AuthorizationError{
+			Message:             "Authentication required but failed to build authorization URL",
+			AuthorizationServer: metadata.AuthorizationEndpoint,
+			ServerURL:           c.serverURL,
+			OriginalError:       originalErr,
+		}
+	}
+
+	slog.Debug("Generated complete authorization URL", 
+		"auth_url", authorizationURL, 
+		"client_id", clientID,
+		"redirect_uri", redirectURI,
+		"state", state)
+
+	return &AuthorizationError{
+		Message:             "Authentication required",
+		AuthorizationServer: metadata.AuthorizationEndpoint,
+		ServerURL:           c.serverURL,
+		AuthorizationURL:    authorizationURL,
+		ClientID:            clientID,
+		RedirectURI:         redirectURI,
+		CodeVerifier:        pkceParams.CodeVerifier,
+		State:               state,
+		OriginalError:       originalErr,
+	}
+}
+
+// generatePKCEParams generates PKCE code verifier and challenge according to RFC 7636
+func generatePKCEParams() (*PKCEParams, error) {
+	// Generate code verifier (43-128 characters)
+	verifierBytes := make([]byte, 32) // 32 bytes = 43 chars when base64url encoded
+	if _, err := rand.Read(verifierBytes); err != nil {
+		return nil, fmt.Errorf("failed to generate code verifier: %w", err)
+	}
+	
+	codeVerifier := base64.RawURLEncoding.EncodeToString(verifierBytes)
+	
+	// Generate code challenge using S256 method
+	hash := sha256.Sum256([]byte(codeVerifier))
+	codeChallenge := base64.RawURLEncoding.EncodeToString(hash[:])
+	
+	return &PKCEParams{
+		CodeVerifier:  codeVerifier,
+		CodeChallenge: codeChallenge,
+		Method:        "S256",
+	}, nil
+}
+
+// generateState generates a random state parameter for OAuth 2.0
+func generateState() (string, error) {
+	stateBytes := make([]byte, 16)
+	if _, err := rand.Read(stateBytes); err != nil {
+		return "", fmt.Errorf("failed to generate state: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(stateBytes), nil
+}
+
+// performClientRegistration performs OAuth 2.0 Dynamic Client Registration
+func (c *Client) performClientRegistration(ctx context.Context, registrationEndpoint string) (*ClientRegistrationResponse, error) {
+	if registrationEndpoint == "" {
+		return nil, fmt.Errorf("registration endpoint not available")
+	}
+
+	// Create registration request
+	request := ClientRegistrationRequest{
+		RedirectURIs:            []string{"urn:ietf:wg:oauth:2.0:oob"}, // Out-of-band redirect for CLI clients
+		TokenEndpointAuthMethod: "none", // Public client
+		GrantTypes:              []string{"authorization_code"},
+		ResponseTypes:           []string{"code"},
+		ClientName:              "cagent",
+		ClientURI:               "https://github.com/docker/cagent",
+		SoftwareID:              "cagent",
+		SoftwareVersion:         "1.0.0",
+		Scope:                   "mcp",
+	}
+
+	requestBody, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal registration request: %w", err)
+	}
+
+	slog.Debug("Performing OAuth 2.0 Dynamic Client Registration", "endpoint", registrationEndpoint)
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", registrationEndpoint, strings.NewReader(string(requestBody)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create registration request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to perform registration request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("registration failed with status %d", resp.StatusCode)
+	}
+
+	var registrationResponse ClientRegistrationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&registrationResponse); err != nil {
+		return nil, fmt.Errorf("failed to decode registration response: %w", err)
+	}
+
+	slog.Debug("Client registration successful", "client_id", registrationResponse.ClientID)
+	return &registrationResponse, nil
+}
+
+// buildAuthorizationURL builds a complete OAuth 2.0 authorization URL with all required parameters
+func buildAuthorizationURL(params *AuthorizationURLParams) (string, error) {
+	if params.AuthorizationEndpoint == "" {
+		return "", fmt.Errorf("authorization endpoint is required")
+	}
+	if params.ClientID == "" {
+		return "", fmt.Errorf("client_id is required")
+	}
+	if params.RedirectURI == "" {
+		return "", fmt.Errorf("redirect_uri is required")
+	}
+
+	authURL, err := url.Parse(params.AuthorizationEndpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid authorization endpoint: %w", err)
+	}
+
+	query := authURL.Query()
+	query.Set("response_type", params.ResponseType)
+	query.Set("client_id", params.ClientID)
+	query.Set("redirect_uri", params.RedirectURI)
+	query.Set("code_challenge", params.CodeChallenge)
+	query.Set("code_challenge_method", params.CodeChallengeMethod)
+	query.Set("state", params.State)
+	
+	if params.Scope != "" {
+		query.Set("scope", params.Scope)
+	}
+	
+	authURL.RawQuery = query.Encode()
+	return authURL.String(), nil
 }
