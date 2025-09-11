@@ -22,11 +22,11 @@ tasks:
     desc: Build the application binary
     cmds:
       - go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BINARY_NAME}} {{.MAIN_PKG}}
-    sources:
-      - "{{.GO_SOURCES}}"
-      - "**/*.txt"
-      - "go.mod"
-      - "go.sum"
+    # sources:
+    #   - "{{.GO_SOURCES}}"
+    #   - "**/*.txt"
+    #   - "go.mod"
+    #   - "go.sum"
     generates:
       - "{{.BUILD_DIR}}/{{.BINARY_NAME}}"
 

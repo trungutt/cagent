@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -17,6 +20,7 @@ import (
 	"github.com/docker/cagent/pkg/session"
 	"github.com/docker/cagent/pkg/team"
 	"github.com/docker/cagent/pkg/tools"
+	"github.com/mark3labs/mcp-go/client"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -43,6 +47,8 @@ type Runtime struct {
 	tracer            trace.Tracer
 	modelsStore       *modelsdev.Store
 	sessionCompaction bool
+
+	code string
 }
 
 type Opt func(*Runtime)
@@ -122,9 +128,9 @@ func (r *Runtime) finalizeEventChannel(ctx context.Context, sess *session.Sessio
 		telemetryClient.RecordSessionEnd(ctx)
 	}
 
-	if sess.Title == "" && len(sess.GetAllMessages()) > 0 {
-		r.generateSessionTitle(context.Background(), sess, events)
-	}
+	// if sess.Title == "" && len(sess.GetAllMessages()) > 0 {
+	// r.generateSessionTitle(context.Background(), sess, events)
+	// }
 }
 
 // Run starts the agent's interaction loop
@@ -184,8 +190,62 @@ func (r *Runtime) RunStream(ctx context.Context, sess *session.Session) <-chan E
 				if telemetryClient := telemetry.FromContext(ctx); telemetryClient != nil {
 					telemetryClient.RecordError(ctx, err.Error())
 				}
-				events <- Error(fmt.Sprintf("failed to get tools: %v", err))
-				return
+				// Check if this is an authorization error and handle specially
+				if client.IsOAuthAuthorizationRequiredError(err) {
+					events <- AuthorizationRequired()
+					<-r.resumeChan
+					slog.Info("do authorization process")
+
+					// start Oauth process
+
+					// Get the OAuth handler from the error
+					oauthHandler := client.GetOAuthHandler(err)
+					// Generate PKCE code verifier and challenge
+					codeVerifier, err := client.GenerateCodeVerifier()
+					if err != nil {
+						slog.Error("Failed to generate code verifier:", "error", err)
+					}
+					codeChallenge := client.GenerateCodeChallenge(codeVerifier)
+
+					// Generate state parameter
+					state, err := client.GenerateState()
+					if err != nil {
+						slog.Error("Failed to generate state:", "error", err)
+					}
+
+					if oauthHandler.GetClientID() == "" {
+						err = oauthHandler.RegisterClient(ctx, "mcp-go-oauth-example")
+						if err != nil {
+							slog.Error("Failed to register client:", "error", err)
+						}
+					}
+
+					// Get the authorization URL
+					authURL, err := oauthHandler.GetAuthorizationURL(ctx, state, codeChallenge)
+					if err != nil {
+						slog.Error("Failed to get authorization URL:", "error", err)
+					}
+
+					// Open the browser to the authorization URL
+					fmt.Printf("Opening browser to: %s\n", authURL)
+					openBrowser(authURL)
+
+					// when dagent reopens with the code
+					<-r.resumeChan
+					// swap code for access token
+					slog.Info("Exchanging authorization code for token...", "code", r.code)
+					err = oauthHandler.ProcessAuthorizationResponse(ctx, r.code, state, codeVerifier)
+					if err != nil {
+						slog.Error("Failed to process authorization response:", "error", err)
+					}
+
+					slog.Info("Authorization successful!")
+
+					agentTools, err = a.Tools(ctx)
+				} else {
+					events <- Error(fmt.Sprintf("failed to get tools: %v", err))
+				}
+				// return
 			}
 			slog.Debug("Retrieved agent tools", "agent", a.Name(), "tool_count", len(agentTools))
 
@@ -285,8 +345,10 @@ func (r *Runtime) RunStream(ctx context.Context, sess *session.Session) <-chan E
 	return events
 }
 
-func (r *Runtime) Resume(_ context.Context, confirmationType string) {
+func (r *Runtime) Resume(_ context.Context, confirmationType, code string) {
 	slog.Debug("Resuming runtime", "agent", r.currentAgent, "confirmation_type", confirmationType)
+
+	r.code = code
 
 	cType := ResumeTypeApproveSession
 	switch confirmationType {
@@ -859,4 +921,25 @@ func (r *Runtime) Summarize(ctx context.Context, sess *session.Session, events c
 	sess.Messages = append(sess.Messages, session.Item{Summary: summary})
 	slog.Debug("Generated session summary", "session_id", sess.ID, "summary_length", len(summary))
 	events <- SessionSummary(sess.ID, summary)
+}
+
+// openBrowser opens the default browser to the specified URL
+func openBrowser(url string) {
+	var err error
+
+	switch runtime.GOOS {
+	case "linux":
+		err = exec.Command("xdg-open", url).Start()
+	case "windows":
+		err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	case "darwin":
+		err = exec.Command("open", url).Start()
+	default:
+		err = fmt.Errorf("unsupported platform")
+	}
+
+	if err != nil {
+		log.Printf("Failed to open browser: %v", err)
+		fmt.Printf("Please open the following URL in your browser: %s\n", url)
+	}
 }

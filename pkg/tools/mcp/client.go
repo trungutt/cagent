@@ -41,8 +41,7 @@ func (c *Client) Start(ctx context.Context) error {
 	slog.Debug("Starting MCP client", c.logType, c.logId)
 
 	if err := c.client.Start(ctx); err != nil {
-		slog.Error("Failed to start MCP client", "error", err)
-		return fmt.Errorf("failed to start MCP client: %w", err)
+		return err
 	}
 
 	slog.Debug("Initializing MCP client", c.logType, c.logId)

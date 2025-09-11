@@ -75,6 +75,6 @@ func (a *App) Subscribe(ctx context.Context, program *tea.Program) {
 // Resume resumes the runtime with the given confirmation type
 func (a *App) Resume(confirmationType string) {
 	if a.runtime != nil {
-		a.runtime.Resume(context.Background(), confirmationType)
+		a.runtime.Resume(context.Background(), confirmationType, "")
 	}
 }

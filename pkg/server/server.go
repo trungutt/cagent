@@ -178,6 +178,7 @@ type sessionResponse struct {
 }
 type resumeSessionRequest struct {
 	Confirmation string `json:"confirmation"`
+	Code         string `json:"code,omitempty"`
 }
 type sessionsResponse struct {
 	ID                         string `json:"id"`
@@ -859,7 +860,12 @@ func (s *Server) resumeSession(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, map[string]string{"error": "runtime not found"})
 	}
 
-	rt.Resume(c.Request().Context(), req.Confirmation)
+	code := ""
+	if req.Code != "" {
+		code = req.Code
+	}
+
+	rt.Resume(c.Request().Context(), req.Confirmation, code)
 
 	return c.JSON(http.StatusOK, map[string]string{"message": "session resumed"})
 }

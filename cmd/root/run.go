@@ -337,12 +337,12 @@ func runWithoutTUI(ctx context.Context, agentFilename string, rt *runtime.Runtim
 				lastConfirmedToolCallID = e.ToolCall.ID // Store the ID to avoid duplicate printing
 				switch result {
 				case ConfirmationApprove:
-					rt.Resume(ctx, string(runtime.ResumeTypeApprove))
+					rt.Resume(ctx, string(runtime.ResumeTypeApprove), "")
 				case ConfirmationApproveSession:
 					sess.ToolsApproved = true
-					rt.Resume(ctx, string(runtime.ResumeTypeApproveSession))
+					rt.Resume(ctx, string(runtime.ResumeTypeApproveSession), "")
 				case ConfirmationReject:
-					rt.Resume(ctx, string(runtime.ResumeTypeReject))
+					rt.Resume(ctx, string(runtime.ResumeTypeReject), "")
 					lastConfirmedToolCallID = "" // Clear on reject since tool won't execute
 				case ConfirmationAbort:
 					// Stop the agent loop immediately
