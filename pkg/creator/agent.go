@@ -52,6 +52,10 @@ func (f *fsToolset) SetOAuthSuccessHandler(func()) {
 	// No-op, this tool does not use OAuth
 }
 
+func (f *fsToolset) SetStreamOutputHandler(tools.StreamOutputHandler) {
+	// No-op, this tool does not use streaming output
+}
+
 func (f *fsToolset) Tools(ctx context.Context) ([]tools.Tool, error) {
 	innerTools, err := f.inner.Tools(ctx)
 	if err != nil {

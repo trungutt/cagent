@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/docker/cagent/pkg/tools"
 )
@@ -23,11 +25,12 @@ type ShellTool struct {
 var _ tools.ToolSet = (*ShellTool)(nil)
 
 type shellHandler struct {
-	shell           string
-	shellArgsPrefix []string
-	env             []string
-	mu              sync.Mutex
-	processes       []*os.Process
+	shell              string
+	shellArgsPrefix    []string
+	env                []string
+	mu                 sync.Mutex
+	processes          []*os.Process
+	streamOutputHandler tools.StreamOutputHandler
 }
 
 type RunShellArgs struct {
@@ -62,10 +65,19 @@ func (h *shellHandler) RunShell(ctx context.Context, toolCall tools.ToolCall) (*
 	// Note: On Windows, we would set CreationFlags, but that requires
 	// platform-specific code in a _windows.go file
 
-	// Capture output using buffers
-	var outBuf, errBuf bytes.Buffer
-	cmd.Stdout = &outBuf
-	cmd.Stderr = &errBuf
+	// Use pipes for real-time output capture
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return &tools.ToolCallResult{
+			Output: fmt.Sprintf("Error creating stdout pipe: %s", err),
+		}, nil
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return &tools.ToolCallResult{
+			Output: fmt.Sprintf("Error creating stderr pipe: %s", err),
+		}, nil
+	}
 
 	// Start the command so we can track it
 	if err := cmd.Start(); err != nil {
@@ -91,27 +103,97 @@ func (h *shellHandler) RunShell(ctx context.Context, toolCall tools.ToolCall) (*
 		h.mu.Unlock()
 	}()
 
-	// Wait for the command to complete and get the result
-	err := cmd.Wait()
+	// Capture output in real-time
+	var outBuf, errBuf bytes.Buffer
+	var wg sync.WaitGroup
+	wg.Add(2)
 
-	// Combine stdout and stderr
-	output := outBuf.String() + errBuf.String()
+	// Read stdout
+	go func() {
+		defer wg.Done()
+		io.Copy(&outBuf, stdoutPipe)
+	}()
 
-	if err != nil {
+	// Read stderr
+	go func() {
+		defer wg.Done()
+		io.Copy(&errBuf, stderrPipe)
+	}()
+
+	// Wait for command completion with timeout
+	const quickCommandTimeout = 30 * time.Second
+	done := make(chan error, 1)
+	go func() {
+		wg.Wait() // Wait for output to be fully read
+		done <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		// Command completed quickly (within 30 seconds)
+		output := outBuf.String() + errBuf.String()
+		if err != nil {
+			return &tools.ToolCallResult{
+				Output: fmt.Sprintf("Error executing command: %s\nOutput: %s", err, output),
+			}, nil
+		}
 		return &tools.ToolCallResult{
-			Output: fmt.Sprintf("Error executing command: %s\nOutput: %s", err, output),
+			Output: fmt.Sprintf("Output: %s", output),
+		}, nil
+
+	case <-time.After(quickCommandTimeout):
+		// Command is taking too long - switch to background mode
+		partialOutput := outBuf.String() + errBuf.String()
+		pid := cmd.Process.Pid
+
+		// Start background goroutine to stream output
+		go h.streamLongRunningCommand(ctx, cmd, &outBuf, &errBuf, &wg, done, pid)
+
+		// Return immediately with partial output
+		return &tools.ToolCallResult{
+			Output: fmt.Sprintf("Command is still running in background (PID: %d)...\n\nPartial output:\n%s\n\n[Streaming additional output as it becomes available...]", pid, partialOutput),
 		}, nil
 	}
+}
 
-	if output == "" {
-		return &tools.ToolCallResult{
-			Output: "<no output>",
-		}, nil
+// streamLongRunningCommand handles streaming output from a command that exceeded the quick timeout
+func (h *shellHandler) streamLongRunningCommand(ctx context.Context, cmd *exec.Cmd, outBuf, errBuf *bytes.Buffer, wg *sync.WaitGroup, done <-chan error, pid int) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	lastOutputLen := outBuf.Len() + errBuf.Len()
+
+	for {
+		select {
+		case err := <-done:
+			// Command completed - send final output
+			finalOutput := outBuf.String() + errBuf.String()
+			if h.streamOutputHandler != nil {
+				if err != nil {
+					h.streamOutputHandler(fmt.Sprintf("[Command PID %d completed with error: %s]\n\nFinal output:\n%s", pid, err, finalOutput))
+				} else {
+					h.streamOutputHandler(fmt.Sprintf("[Command PID %d completed successfully]\n\nFinal output:\n%s", pid, finalOutput))
+				}
+			}
+			return
+
+		case <-ctx.Done():
+			// Context cancelled - command should be killed by exec.CommandContext
+			if h.streamOutputHandler != nil {
+				h.streamOutputHandler(fmt.Sprintf("[Command PID %d cancelled by context]", pid))
+			}
+			return
+
+		case <-ticker.C:
+			// Check if there's new output to stream
+			currentOutputLen := outBuf.Len() + errBuf.Len()
+			if currentOutputLen > lastOutputLen && h.streamOutputHandler != nil {
+				newOutput := (outBuf.String() + errBuf.String())[lastOutputLen:]
+				h.streamOutputHandler(fmt.Sprintf("[Streaming output from PID %d]:\n%s", pid, newOutput))
+				lastOutputLen = currentOutputLen
+			}
+		}
 	}
-
-	return &tools.ToolCallResult{
-		Output: output,
-	}, nil
 }
 
 func NewShellTool(env []string) *ShellTool {
@@ -268,4 +350,11 @@ func (t *ShellTool) Stop(context.Context) error {
 	t.handler.processes = nil
 
 	return nil
+}
+
+// SetStreamOutputHandler sets the handler for streaming output from long-running commands
+func (t *ShellTool) SetStreamOutputHandler(handler tools.StreamOutputHandler) {
+	t.handler.mu.Lock()
+	defer t.handler.mu.Unlock()
+	t.handler.streamOutputHandler = handler
 }
