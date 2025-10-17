@@ -25,11 +25,11 @@ type ShellTool struct {
 var _ tools.ToolSet = (*ShellTool)(nil)
 
 type shellHandler struct {
-	shell              string
-	shellArgsPrefix    []string
-	env                []string
-	mu                 sync.Mutex
-	processes          []*os.Process
+	shell               string
+	shellArgsPrefix     []string
+	env                 []string
+	mu                  sync.Mutex
+	processes           []*os.Process
 	streamOutputHandler tools.StreamOutputHandler
 }
 
@@ -111,13 +111,13 @@ func (h *shellHandler) RunShell(ctx context.Context, toolCall tools.ToolCall) (*
 	// Read stdout
 	go func() {
 		defer wg.Done()
-		io.Copy(&outBuf, stdoutPipe)
+		_, _ = io.Copy(&outBuf, stdoutPipe)
 	}()
 
 	// Read stderr
 	go func() {
 		defer wg.Done()
-		io.Copy(&errBuf, stderrPipe)
+		_, _ = io.Copy(&errBuf, stderrPipe)
 	}()
 
 	// Wait for command completion with timeout
@@ -147,7 +147,7 @@ func (h *shellHandler) RunShell(ctx context.Context, toolCall tools.ToolCall) (*
 		pid := cmd.Process.Pid
 
 		// Start background goroutine to stream output
-		go h.streamLongRunningCommand(ctx, cmd, &outBuf, &errBuf, &wg, done, pid)
+		go h.streamLongRunningCommand(ctx, &outBuf, &errBuf, done, pid)
 
 		// Return immediately with partial output
 		return &tools.ToolCallResult{
@@ -157,7 +157,7 @@ func (h *shellHandler) RunShell(ctx context.Context, toolCall tools.ToolCall) (*
 }
 
 // streamLongRunningCommand handles streaming output from a command that exceeded the quick timeout
-func (h *shellHandler) streamLongRunningCommand(ctx context.Context, cmd *exec.Cmd, outBuf, errBuf *bytes.Buffer, wg *sync.WaitGroup, done <-chan error, pid int) {
+func (h *shellHandler) streamLongRunningCommand(ctx context.Context, outBuf, errBuf *bytes.Buffer, done <-chan error, pid int) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
