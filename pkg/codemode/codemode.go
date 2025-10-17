@@ -136,7 +136,3 @@ func (c *codeModeTool) SetElicitationHandler(tools.ElicitationHandler) {
 func (c *codeModeTool) SetOAuthSuccessHandler(func()) {
 	// No-op, this tool does not use OAuth
 }
-
-func (c *codeModeTool) SetStreamOutputHandler(tools.StreamOutputHandler) {
-	// No-op, this tool does not use streaming output
-}

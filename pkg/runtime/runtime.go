@@ -234,10 +234,6 @@ func (r *runtime) RunStream(ctx context.Context, sess *session.Session) <-chan E
 			toolset.SetOAuthSuccessHandler(func() {
 				events <- Authorization("confirmed", r.currentAgent)
 			})
-			// Set stream output handler for long-running commands (e.g., shell)
-			toolset.SetStreamOutputHandler(func(output string) {
-				events <- ShellOutput(output)
-			})
 		}
 
 		agentTools, err := r.getTools(ctx, a, sessionSpan, events)

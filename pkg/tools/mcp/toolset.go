@@ -272,7 +272,3 @@ func (ts *Toolset) SetOAuthSuccessHandler(handler func()) {
 		remoteClient.mu.Unlock()
 	}
 }
-
-func (ts *Toolset) SetStreamOutputHandler(tools.StreamOutputHandler) {
-	// No-op, MCP toolsets do not use streaming output
-}

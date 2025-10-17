@@ -121,10 +121,6 @@ func (t *GatewayToolset) SetOAuthSuccessHandler(func()) {
 	// No-op, as the gateway does not support OAuth
 }
 
-func (t *GatewayToolset) SetStreamOutputHandler(tools.StreamOutputHandler) {
-	// No-op, MCP gateway toolsets do not use streaming output
-}
-
 func writeSecretsToFile(ctx context.Context, mcpServerName string, secrets []gateway.Secret, envProvider environment.Provider) (string, error) {
 	var secretValues []string
 	for _, secret := range secrets {

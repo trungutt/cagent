@@ -25,12 +25,19 @@ type ShellTool struct {
 var _ tools.ToolSet = (*ShellTool)(nil)
 
 type shellHandler struct {
-	shell               string
-	shellArgsPrefix     []string
-	env                 []string
-	mu                  sync.Mutex
-	processes           []*os.Process
-	streamOutputHandler tools.StreamOutputHandler
+	shell              string
+	shellArgsPrefix    []string
+	env                []string
+	mu                 sync.Mutex
+	processes          []*os.Process
+	backgroundCommands map[int]*backgroundCommand
+}
+
+type backgroundCommand struct {
+	cmd    *exec.Cmd
+	outBuf *bytes.Buffer
+	errBuf *bytes.Buffer
+	done   chan error
 }
 
 type RunShellArgs struct {
@@ -142,57 +149,77 @@ func (h *shellHandler) RunShell(ctx context.Context, toolCall tools.ToolCall) (*
 		}, nil
 
 	case <-time.After(quickCommandTimeout):
-		// Command is taking too long - switch to background mode
-		partialOutput := outBuf.String() + errBuf.String()
+		// Command is taking too long - track it as a background command
 		pid := cmd.Process.Pid
 
-		// Start background goroutine to stream output
-		go h.streamLongRunningCommand(ctx, &outBuf, &errBuf, done, pid)
+		h.mu.Lock()
+		if h.backgroundCommands == nil {
+			h.backgroundCommands = make(map[int]*backgroundCommand)
+		}
+		h.backgroundCommands[pid] = &backgroundCommand{
+			cmd:    cmd,
+			outBuf: &outBuf,
+			errBuf: &errBuf,
+			done:   done,
+		}
+		h.mu.Unlock()
 
-		// Return immediately with partial output
+		// Return immediately with PID
 		return &tools.ToolCallResult{
-			Output: fmt.Sprintf("Command is still running in background (PID: %d)...\n\nPartial output:\n%s\n\n[Streaming additional output as it becomes available...]", pid, partialOutput),
+			Output: fmt.Sprintf("Command is running in background (PID: %d). Use get_logs tool with this PID to retrieve output.", pid),
 		}, nil
 	}
 }
 
-// streamLongRunningCommand handles streaming output from a command that exceeded the quick timeout
-func (h *shellHandler) streamLongRunningCommand(ctx context.Context, outBuf, errBuf *bytes.Buffer, done <-chan error, pid int) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+type GetLogsArgs struct {
+	PID int `json:"pid" jsonschema:"The process ID of the background command"`
+}
 
-	lastOutputLen := outBuf.Len() + errBuf.Len()
+func (h *shellHandler) GetLogs(ctx context.Context, toolCall tools.ToolCall) (*tools.ToolCallResult, error) {
+	var params GetLogsArgs
+	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
+		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
 
-	for {
-		select {
-		case err := <-done:
-			// Command completed - send final output
-			finalOutput := outBuf.String() + errBuf.String()
-			if h.streamOutputHandler != nil {
-				if err != nil {
-					h.streamOutputHandler(fmt.Sprintf("[Command PID %d completed with error: %s]\n\nFinal output:\n%s", pid, err, finalOutput))
-				} else {
-					h.streamOutputHandler(fmt.Sprintf("[Command PID %d completed successfully]\n\nFinal output:\n%s", pid, finalOutput))
-				}
-			}
-			return
+	h.mu.Lock()
+	bgCmd, exists := h.backgroundCommands[params.PID]
+	h.mu.Unlock()
 
-		case <-ctx.Done():
-			// Context cancelled - command should be killed by exec.CommandContext
-			if h.streamOutputHandler != nil {
-				h.streamOutputHandler(fmt.Sprintf("[Command PID %d cancelled by context]", pid))
-			}
-			return
+	if !exists {
+		return &tools.ToolCallResult{
+			Output: fmt.Sprintf("No background command found with PID: %d", params.PID),
+		}, nil
+	}
 
-		case <-ticker.C:
-			// Check if there's new output to stream
-			currentOutputLen := outBuf.Len() + errBuf.Len()
-			if currentOutputLen > lastOutputLen && h.streamOutputHandler != nil {
-				newOutput := (outBuf.String() + errBuf.String())[lastOutputLen:]
-				h.streamOutputHandler(fmt.Sprintf("[Streaming output from PID %d]:\n%s", pid, newOutput))
-				lastOutputLen = currentOutputLen
-			}
+	// Check if command has completed
+	select {
+	case err := <-bgCmd.done:
+		// Command completed - get final output and clean up
+		h.mu.Lock()
+		delete(h.backgroundCommands, params.PID)
+		h.mu.Unlock()
+
+		output := bgCmd.outBuf.String() + bgCmd.errBuf.String()
+		if err != nil {
+			return &tools.ToolCallResult{
+				Output: fmt.Sprintf("Command (PID: %d) completed with error: %s\n\nOutput:\n%s", params.PID, err, output),
+			}, nil
 		}
+		return &tools.ToolCallResult{
+			Output: fmt.Sprintf("Command (PID: %d) completed successfully.\n\nOutput:\n%s", params.PID, output),
+		}, nil
+
+	default:
+		// Command still running - return current output
+		output := bgCmd.outBuf.String() + bgCmd.errBuf.String()
+		if output == "" {
+			return &tools.ToolCallResult{
+				Output: fmt.Sprintf("Command (PID: %d) is still running. No output yet.", params.PID),
+			}, nil
+		}
+		return &tools.ToolCallResult{
+			Output: fmt.Sprintf("Command (PID: %d) is still running.\n\nCurrent output:\n%s", params.PID, output),
+		}, nil
 	}
 }
 
@@ -314,6 +341,17 @@ func (t *ShellTool) Tools(context.Context) ([]tools.Tool, error) {
 				Title: "Run Shell Command",
 			},
 		},
+		{
+			Name:         "get_logs",
+			Category:     "shell",
+			Description:  `Retrieves the output logs from a background shell command by its process ID.`,
+			Parameters:   tools.MustSchemaFor[GetLogsArgs](),
+			OutputSchema: tools.MustSchemaFor[string](),
+			Handler:      t.handler.GetLogs,
+			Annotations: tools.ToolAnnotations{
+				Title: "Get Background Command Logs",
+			},
+		},
 	}, nil
 }
 
@@ -350,11 +388,4 @@ func (t *ShellTool) Stop(context.Context) error {
 	t.handler.processes = nil
 
 	return nil
-}
-
-// SetStreamOutputHandler sets the handler for streaming output from long-running commands
-func (t *ShellTool) SetStreamOutputHandler(handler tools.StreamOutputHandler) {
-	t.handler.mu.Lock()
-	defer t.handler.mu.Unlock()
-	t.handler.streamOutputHandler = handler
 }

@@ -48,10 +48,6 @@ type ElicitationResult struct {
 // This allows the runtime to handle elicitation requests and propagate them to its own client
 type ElicitationHandler func(ctx context.Context, req *mcp.ElicitParams) (ElicitationResult, error)
 
-// StreamOutputHandler is a function type that handles streaming output from long-running tools
-// This allows tools to send incremental output updates to the runtime's events channel
-type StreamOutputHandler func(output string)
-
 type ToolSet interface {
 	Tools(ctx context.Context) ([]Tool, error)
 	Instructions() string
@@ -59,5 +55,4 @@ type ToolSet interface {
 	Stop(ctx context.Context) error
 	SetElicitationHandler(handler ElicitationHandler)
 	SetOAuthSuccessHandler(handler func())
-	SetStreamOutputHandler(handler StreamOutputHandler)
 }
