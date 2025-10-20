@@ -52,7 +52,10 @@ func (h *shellHandler) RunShell(ctx context.Context, toolCall tools.ToolCall) (*
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, h.shell, append(h.shellArgsPrefix, params.Cmd)...)
+	// Use context.Background() instead of ctx to prevent command interruption when
+	// the incoming context is cancelled (e.g., when an API request ends).
+	// Commands should only be stopped explicitly via Stop() or process cleanup.
+	cmd := exec.CommandContext(context.Background(), h.shell, append(h.shellArgsPrefix, params.Cmd)...)
 	cmd.Env = h.env
 	if params.Cwd != "" {
 		cmd.Dir = params.Cwd
