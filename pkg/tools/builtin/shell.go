@@ -41,8 +41,9 @@ type backgroundCommand struct {
 }
 
 type RunShellArgs struct {
-	Cmd string `json:"cmd" jsonschema:"The shell command to execute"`
-	Cwd string `json:"cwd" jsonschema:"The working directory to execute the command in"`
+	Cmd        string `json:"cmd" jsonschema:"The shell command to execute"`
+	Cwd        string `json:"cwd" jsonschema:"The working directory to execute the command in"`
+	Background bool   `json:"background,omitempty" jsonschema:"Set to true to run the command in the background immediately and return the PID. Use this for long-running commands like 'npm start', 'npm run dev', or 'docker-compose up'."`
 }
 
 func (h *shellHandler) RunShell(ctx context.Context, toolCall tools.ToolCall) (*tools.ToolCallResult, error) {
@@ -134,6 +135,28 @@ func (h *shellHandler) RunShell(ctx context.Context, toolCall tools.ToolCall) (*
 		wg.Wait() // Wait for output to be fully read
 		done <- cmd.Wait()
 	}()
+
+	// If background flag is set, return immediately with PID
+	if params.Background {
+		pid := cmd.Process.Pid
+
+		h.mu.Lock()
+		if h.backgroundCommands == nil {
+			h.backgroundCommands = make(map[int]*backgroundCommand)
+		}
+		h.backgroundCommands[pid] = &backgroundCommand{
+			cmd:    cmd,
+			outBuf: &outBuf,
+			errBuf: &errBuf,
+			done:   done,
+		}
+		h.mu.Unlock()
+
+		// Return immediately with PID
+		return &tools.ToolCallResult{
+			Output: fmt.Sprintf("Command is running in background (PID: %d). Use get_logs tool with this PID to retrieve output.", pid),
+		}, nil
+	}
 
 	select {
 	case err := <-done:
@@ -282,10 +305,11 @@ On Unix-like systems, ${SHELL} is used or /bin/sh as fallback.
 
 ## Parameter Reference
 
-| Parameter | Type   | Required | Description |
-|-----------|--------|----------|-------------|
-| cmd       | string | Yes      | Shell command to execute |
-| cwd       | string | Yes      | Working directory (use "." for current) |
+| Parameter  | Type    | Required | Description |
+|------------|---------|----------|-------------|
+| cmd        | string  | Yes      | Shell command to execute |
+| cwd        | string  | Yes      | Working directory (use "." for current) |
+| background | boolean | No       | Set to true to run in background immediately and return PID. Use for long-running commands like dev servers, database containers, or continuous processes. |
 
 ## Best Practices
 
@@ -301,6 +325,12 @@ On Unix-like systems, ${SHELL} is used or /bin/sh as fallback.
 
 **Basic command execution:**
 { "cmd": "ls -la", "cwd": "." }
+
+**Background execution for long-running commands:**
+{ "cmd": "npm start", "cwd": "frontend", "background": true }
+{ "cmd": "npm run dev", "cwd": ".", "background": true }
+{ "cmd": "docker-compose up", "cwd": ".", "background": true }
+{ "cmd": "go run main.go", "cwd": ".", "background": true }
 
 **Language-specific operations:**
 { "cmd": "go test ./...", "cwd": "." }

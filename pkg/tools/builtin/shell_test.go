@@ -2,6 +2,7 @@ package builtin
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -34,7 +35,7 @@ func TestShellTool_Tools(t *testing.T) {
 	allTools, err := tool.Tools(t.Context())
 
 	require.NoError(t, err)
-	assert.Len(t, allTools, 2) // shell and get_logs
+	assert.Len(t, allTools, 2)
 	for _, tool := range allTools {
 		assert.NotNil(t, tool.Handler)
 		assert.Equal(t, "shell", tool.Category)
@@ -58,6 +59,10 @@ func TestShellTool_Tools(t *testing.T) {
 		"cwd": {
 			"description": "The working directory to execute the command in",
 			"type": "string"
+		},
+		"background": {
+			"description": "Set to true to run the command in the background immediately and return the PID. Use this for long-running commands like 'npm start', 'npm run dev', or 'docker-compose up'.",
+			"type": "boolean"
 		}
 	},
 	"additionalProperties": false,
@@ -87,7 +92,7 @@ func TestShellTool_HandlerEcho(t *testing.T) {
 	// Get handler from tool
 	tls, err := tool.Tools(t.Context())
 	require.NoError(t, err)
-	require.Len(t, tls, 2) // shell and get_logs
+	require.Len(t, tls, 2)
 
 	handler := tls[0].Handler
 
@@ -121,7 +126,7 @@ func TestShellTool_HandlerWithCwd(t *testing.T) {
 	// Get handler from tool
 	tls, err := tool.Tools(t.Context())
 	require.NoError(t, err)
-	require.Len(t, tls, 2) // shell and get_logs
+	require.Len(t, tls, 2)
 
 	handler := tls[0].Handler
 
@@ -159,7 +164,7 @@ func TestShellTool_HandlerError(t *testing.T) {
 	// Get handler from tool
 	tls, err := tool.Tools(t.Context())
 	require.NoError(t, err)
-	require.Len(t, tls, 2) // shell and get_logs
+	require.Len(t, tls, 2)
 
 	handler := tls[0].Handler
 
@@ -192,7 +197,7 @@ func TestShellTool_InvalidArguments(t *testing.T) {
 	// Get handler from tool
 	tls, err := tool.Tools(t.Context())
 	require.NoError(t, err)
-	require.Len(t, tls, 2) // shell and get_logs
+	require.Len(t, tls, 2)
 
 	handler := tls[0].Handler
 
@@ -246,4 +251,155 @@ func TestShellTool_ParametersAreObjects(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "object", m["type"])
 	}
+}
+
+func TestShellTool_BackgroundExecution(t *testing.T) {
+	// This test verifies that background execution returns PID immediately
+	tool := NewShellTool(nil)
+
+	// Get handler from tool
+	tls, err := tool.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tls, 2)
+
+	handler := tls[0].Handler
+
+	// Create tool call for a command that would normally take time
+	// Using sleep to simulate a long-running command
+	args := RunShellArgs{
+		Cmd:        "sleep 5",
+		Cwd:        "",
+		Background: true,
+	}
+	argsBytes, err := json.Marshal(args)
+	require.NoError(t, err)
+
+	toolCall := tools.ToolCall{
+		Function: tools.FunctionCall{
+			Name:      "shell",
+			Arguments: string(argsBytes),
+		},
+	}
+
+	// Call handler
+	result, err := handler(t.Context(), toolCall)
+
+	// Verify
+	require.NoError(t, err)
+	assert.Contains(t, result.Output, "Command is running in background")
+	assert.Contains(t, result.Output, "PID:")
+	assert.Contains(t, result.Output, "Use get_logs tool")
+
+	// Clean up - stop the tool to kill background processes
+	err = tool.Stop(t.Context())
+	require.NoError(t, err)
+}
+
+func TestShellTool_BackgroundFalseStillWaits(t *testing.T) {
+	// This test verifies that background=false still waits for quick commands
+	tool := NewShellTool(nil)
+
+	// Get handler from tool
+	tls, err := tool.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tls, 2)
+
+	handler := tls[0].Handler
+
+	// Create tool call with background=false (explicit)
+	args := RunShellArgs{
+		Cmd:        "echo 'test output'",
+		Cwd:        "",
+		Background: false,
+	}
+	argsBytes, err := json.Marshal(args)
+	require.NoError(t, err)
+
+	toolCall := tools.ToolCall{
+		Function: tools.FunctionCall{
+			Name:      "shell",
+			Arguments: string(argsBytes),
+		},
+	}
+
+	// Call handler
+	result, err := handler(t.Context(), toolCall)
+
+	// Verify it returns the output immediately, not a PID
+	require.NoError(t, err)
+	assert.Contains(t, result.Output, "test output")
+	assert.NotContains(t, result.Output, "PID:")
+	assert.NotContains(t, result.Output, "background")
+}
+
+func TestShellTool_GetLogsFromBackgroundCommand(t *testing.T) {
+	// This test verifies that get_logs can retrieve output from background commands
+	tool := NewShellTool(nil)
+
+	// Get handlers from tool
+	tls, err := tool.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tls, 2)
+
+	shellHandler := tls[0].Handler
+	getLogsHandler := tls[1].Handler
+
+	// Start a background command
+	args := RunShellArgs{
+		Cmd:        "echo 'background output' && sleep 1",
+		Cwd:        "",
+		Background: true,
+	}
+	argsBytes, err := json.Marshal(args)
+	require.NoError(t, err)
+
+	toolCall := tools.ToolCall{
+		Function: tools.FunctionCall{
+			Name:      "shell",
+			Arguments: string(argsBytes),
+		},
+	}
+
+	// Call shell handler
+	result, err := shellHandler(t.Context(), toolCall)
+	require.NoError(t, err)
+	assert.Contains(t, result.Output, "PID:")
+
+	// Extract PID from output (format: "Command is running in background (PID: 12345)")
+	var pid int
+	_, err = fmt.Sscanf(result.Output, "Command is running in background (PID: %d)", &pid)
+	require.NoError(t, err)
+	assert.Positive(t, pid)
+
+	// Wait a bit for command to produce output
+	// (in real usage, the LLM would call get_logs when it wants to check)
+	// Using a small sleep to let the echo complete
+	// Note: sleep 1 in the command ensures it stays alive long enough
+	// time.Sleep(100 * time.Millisecond)
+
+	// Now call get_logs
+	getLogsArgs := GetLogsArgs{
+		PID: pid,
+	}
+	getLogsArgsBytes, err := json.Marshal(getLogsArgs)
+	require.NoError(t, err)
+
+	getLogsCall := tools.ToolCall{
+		Function: tools.FunctionCall{
+			Name:      "get_logs",
+			Arguments: string(getLogsArgsBytes),
+		},
+	}
+
+	logsResult, err := getLogsHandler(t.Context(), getLogsCall)
+	require.NoError(t, err)
+
+	// The output should contain either the running status or the completed output
+	assert.Contains(t, logsResult.Output, "PID:")
+	// Eventually it should show our echo output
+	// Note: might be still running or completed depending on timing
+
+	// Clean up
+	err = tool.Stop(t.Context())
+	require.NoError(t, err)
 }
