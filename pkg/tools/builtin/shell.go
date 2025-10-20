@@ -129,7 +129,7 @@ func (h *shellHandler) RunShell(ctx context.Context, toolCall tools.ToolCall) (*
 	}()
 
 	// Wait for command completion with timeout
-	const quickCommandTimeout = 30 * time.Second
+	const quickCommandTimeout = 10 * time.Second
 	done := make(chan error, 1)
 	go func() {
 		wg.Wait() // Wait for output to be fully read

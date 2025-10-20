@@ -336,7 +336,6 @@ func TestShellTool_GetLogsFromBackgroundCommand(t *testing.T) {
 	// This test verifies that get_logs can retrieve output from background commands
 	tool := NewShellTool(nil)
 
-	// Get handlers from tool
 	tls, err := tool.Tools(t.Context())
 	require.NoError(t, err)
 	require.Len(t, tls, 2)
@@ -344,7 +343,6 @@ func TestShellTool_GetLogsFromBackgroundCommand(t *testing.T) {
 	shellHandler := tls[0].Handler
 	getLogsHandler := tls[1].Handler
 
-	// Start a background command
 	args := RunShellArgs{
 		Cmd:        "echo 'background output' && sleep 1",
 		Cwd:        "",
@@ -360,24 +358,15 @@ func TestShellTool_GetLogsFromBackgroundCommand(t *testing.T) {
 		},
 	}
 
-	// Call shell handler
 	result, err := shellHandler(t.Context(), toolCall)
 	require.NoError(t, err)
 	assert.Contains(t, result.Output, "PID:")
 
-	// Extract PID from output (format: "Command is running in background (PID: 12345)")
 	var pid int
 	_, err = fmt.Sscanf(result.Output, "Command is running in background (PID: %d)", &pid)
 	require.NoError(t, err)
 	assert.Positive(t, pid)
 
-	// Wait a bit for command to produce output
-	// (in real usage, the LLM would call get_logs when it wants to check)
-	// Using a small sleep to let the echo complete
-	// Note: sleep 1 in the command ensures it stays alive long enough
-	// time.Sleep(100 * time.Millisecond)
-
-	// Now call get_logs
 	getLogsArgs := GetLogsArgs{
 		PID: pid,
 	}
@@ -396,10 +385,7 @@ func TestShellTool_GetLogsFromBackgroundCommand(t *testing.T) {
 
 	// The output should contain either the running status or the completed output
 	assert.Contains(t, logsResult.Output, "PID:")
-	// Eventually it should show our echo output
-	// Note: might be still running or completed depending on timing
 
-	// Clean up
 	err = tool.Stop(t.Context())
 	require.NoError(t, err)
 }
