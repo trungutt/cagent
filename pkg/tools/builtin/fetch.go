@@ -299,7 +299,10 @@ FEATURES
 
 USAGE TIPS
 - Use single URLs for simple content fetching
-- Use multiple URLs for batch operations`
+- Use multiple URLs for batch operations
+
+TOOL CALL FORMAT
+- When calling fetch, always specify arguments in order: "urls" first, then "format", then "timeout"`
 }
 
 func (t *FetchTool) Tools(context.Context) ([]tools.Tool, error) {
@@ -307,7 +310,7 @@ func (t *FetchTool) Tools(context.Context) ([]tools.Tool, error) {
 		{
 			Name:        ToolNameFetch,
 			Category:    "fetch",
-			Description: "Fetch content from one or more HTTP/HTTPS URLs. Returns the response body and metadata.",
+			Description: "Fetch content from one or more HTTP/HTTPS URLs. Returns the response body and metadata. When calling this tool, always specify arguments in order: urls first, then format, then timeout.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -316,17 +319,17 @@ func (t *FetchTool) Tools(context.Context) ([]tools.Tool, error) {
 						"items": map[string]any{
 							"type": "string",
 						},
-						"description": "Array of URLs to fetch",
+						"description": "Array of URLs to fetch. Specify this parameter first.",
 						"minItems":    1,
 					},
 					"format": map[string]any{
 						"type":        "string",
-						"description": "The format to return the content in (text, markdown, or html)",
+						"description": "The format to return the content in (text, markdown, or html). Specify after urls.",
 						"enum":        []string{"text", "markdown", "html"},
 					},
 					"timeout": map[string]any{
 						"type":        "integer",
-						"description": "Request timeout in seconds (default: 30)",
+						"description": "Request timeout in seconds (default: 30). Specify after urls and format.",
 						"minimum":     1,
 						"maximum":     300,
 					},
