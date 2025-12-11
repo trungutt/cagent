@@ -98,9 +98,9 @@ func (lw *limitedWriter) Write(p []byte) (n int, err error) {
 }
 
 type RunShellArgs struct {
-	Cmd     string `json:"cmd" jsonschema:"The shell command to execute"`
-	Cwd     string `json:"cwd,omitempty" jsonschema:"The working directory to execute the command in (default: \".\")"`
-	Timeout int    `json:"timeout,omitempty" jsonschema:"Command execution timeout in seconds (default: 30)"`
+	Cmd     string `json:"cmd" jsonschema:"description=The shell command to execute. Specify this parameter first."`
+	Cwd     string `json:"cwd,omitempty" jsonschema:"description=The working directory to execute the command in (default: \".\"). Specify after cmd."`
+	Timeout int    `json:"timeout,omitempty" jsonschema:"description=Command execution timeout in seconds (default: 30). Specify after cmd and cwd."`
 }
 
 type RunShellBackgroundArgs struct {
@@ -594,7 +594,10 @@ Use list_background_jobs to see all jobs with their status
 2. Start frontend: run_background_job with dev server
 3. Perform tasks: use other tools while services run
 4. Check logs: view_background_job to see service output
-5. Cleanup: stop_background_job for each service (or let agent cleanup automatically)`
+5. Cleanup: stop_background_job for each service (or let agent cleanup automatically)
+
+## Tool Call Format
+- When calling shell, always specify arguments in order: "cmd" first, then "cwd", then "timeout"`
 }
 
 func (t *ShellTool) Tools(context.Context) ([]tools.Tool, error) {
@@ -602,7 +605,7 @@ func (t *ShellTool) Tools(context.Context) ([]tools.Tool, error) {
 		{
 			Name:         ToolNameShell,
 			Category:     "shell",
-			Description:  `Executes the given shell command in the user's default shell.`,
+			Description:  `Executes the given shell command in the user's default shell. When calling this tool, always specify arguments in order: cmd first, then cwd, then timeout.`,
 			Parameters:   tools.MustSchemaFor[RunShellArgs](),
 			OutputSchema: tools.MustSchemaFor[string](),
 			Handler:      NewHandler(t.handler.RunShell),
