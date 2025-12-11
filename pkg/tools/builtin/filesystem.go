@@ -103,7 +103,10 @@ This toolset provides comprehensive filesystem operations with built-in security
 ### Performance Tips
 - Use read_multiple_files instead of multiple read_file calls
 - Use directory_tree with max_depth to limit large traversals
-- Use appropriate exclude patterns in search operations`
+- Use appropriate exclude patterns in search operations
+
+### Tool Call Format
+- When calling write_file, always specify arguments in order: "path" first, then "content"`
 }
 
 type DirectoryTreeArgs struct {
@@ -115,8 +118,8 @@ type AddAllowedDirectoryArgs struct {
 }
 
 type WriteFileArgs struct {
-	Path    string `json:"path" jsonschema:"The file path to write"`
-	Content string `json:"content" jsonschema:"The content to write to the file"`
+	Path    string `json:"path" jsonschema:"description=The file path to write. Specify this parameter first before content."`
+	Content string `json:"content" jsonschema:"description=The content to write to the file. Specify this parameter after path."`
 }
 
 type ReadMultipleFilesArgs struct {
@@ -289,7 +292,7 @@ func (t *FilesystemTool) Tools(context.Context) ([]tools.Tool, error) {
 		{
 			Name:         ToolNameWriteFile,
 			Category:     "filesystem",
-			Description:  "Create a new file or completely overwrite an existing file with new content.",
+			Description:  "Create a new file or completely overwrite an existing file with new content. When calling this tool, always specify arguments in order: path first, then content.",
 			Parameters:   tools.MustSchemaFor[WriteFileArgs](),
 			OutputSchema: tools.MustSchemaFor[string](),
 			Handler:      NewHandler(t.handleWriteFile),
