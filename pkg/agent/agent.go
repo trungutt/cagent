@@ -6,30 +6,32 @@ import (
 	"log/slog"
 	"math/rand"
 
+	"github.com/docker/cagent/pkg/config/latest"
 	"github.com/docker/cagent/pkg/model/provider"
 	"github.com/docker/cagent/pkg/tools"
 )
 
 // Agent represents an AI agent
 type Agent struct {
-	name               string
-	description        string
-	welcomeMessage     string
-	instruction        string
-	toolsets           []*StartableToolSet
-	models             []provider.Provider
-	subAgents          []*Agent
-	handoffs           []*Agent
-	parents            []*Agent
-	addDate            bool
-	addEnvironmentInfo bool
-	maxIterations      int
-	numHistoryItems    int
-	addPromptFiles     []string
-	tools              []tools.Tool
-	commands           map[string]string
-	pendingWarnings    []string
-	skillsEnabled      bool
+	name                    string
+	description             string
+	welcomeMessage          string
+	instruction             string
+	toolsets                []*StartableToolSet
+	models                  []provider.Provider
+	subAgents               []*Agent
+	handoffs                []*Agent
+	parents                 []*Agent
+	addDate                 bool
+	addEnvironmentInfo      bool
+	maxIterations           int
+	numHistoryItems         int
+	addPromptFiles          []string
+	tools                   []tools.Tool
+	commands                map[string]string
+	pendingWarnings         []string
+	skillsEnabled           bool
+	followUpSuggestionsConf *latest.FollowUpSuggestionsConfig
 }
 
 // New creates a new agent
@@ -118,6 +120,11 @@ func (a *Agent) Commands() map[string]string {
 // SkillsEnabled returns whether skills discovery is enabled for this agent.
 func (a *Agent) SkillsEnabled() bool {
 	return a.skillsEnabled
+}
+
+// FollowUpSuggestionsConfig returns the follow-up suggestions configuration for this agent.
+func (a *Agent) FollowUpSuggestionsConfig() *latest.FollowUpSuggestionsConfig {
+	return a.followUpSuggestionsConf
 }
 
 // Tools returns the tools available to this agent
