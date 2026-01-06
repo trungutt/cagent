@@ -102,3 +102,74 @@ func TestTargetURLForHost(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractFirstUserMessage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		body     string
+		expected string
+	}{
+		{
+			name:     "simple string content",
+			body:     `{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":"Hello world"}]}`,
+			expected: "Hello world",
+		},
+		{
+			name:     "content blocks with text",
+			body:     `{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":[{"type":"text","text":"What is Docker?"}]}]}`,
+			expected: "What is Docker?",
+		},
+		{
+			name:     "content blocks with cache_control (should be ignored)",
+			body:     `{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":[{"type":"text","text":"What is Docker?","cache_control":{"type":"ephemeral"}}]}]}`,
+			expected: "What is Docker?",
+		},
+		{
+			name:     "multiple user messages - returns first only",
+			body:     `{"model":"gpt-4","messages":[{"role":"user","content":"First"},{"role":"assistant","content":"Response"},{"role":"user","content":"Second"}]}`,
+			expected: "First",
+		},
+		{
+			name:     "invalid JSON",
+			body:     `not json`,
+			expected: "",
+		},
+		{
+			name:     "empty body",
+			body:     `{}`,
+			expected: "",
+		},
+		{
+			name:     "ignores system and assistant messages",
+			body:     `{"model":"claude-3","messages":[{"role":"system","content":"You are helpful"},{"role":"user","content":"Hi"},{"role":"assistant","content":"Hello"}]}`,
+			expected: "Hi",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			msg := extractFirstUserMessage(tt.body)
+			assert.Equal(t, tt.expected, msg)
+		})
+	}
+}
+
+func TestExtractFirstUserMessage_MatchesAcrossVersions(t *testing.T) {
+	t.Parallel()
+
+	// Request without cache_control (old cagent version)
+	oldBody := `{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":[{"type":"text","text":"What's a Dockerfile?"}]}],"system":[{"text":"You are helpful"}],"tools":[]}`
+
+	// Request with cache_control (new cagent version)
+	newBody := `{"model":"claude-haiku-4-5-20251001","messages":[{"role":"user","content":[{"type":"text","text":"What's a Dockerfile?","cache_control":{"type":"ephemeral"}}]}],"system":[{"text":"You are helpful","cache_control":{"type":"ephemeral"}}],"tools":[],"stream":true}`
+
+	oldMsg := extractFirstUserMessage(oldBody)
+	newMsg := extractFirstUserMessage(newBody)
+
+	assert.Equal(t, oldMsg, newMsg, "messages should match across versions")
+	assert.Equal(t, "What's a Dockerfile?", oldMsg)
+}

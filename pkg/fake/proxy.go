@@ -4,6 +4,7 @@ package fake
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,7 +12,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/labstack/echo/v4"
@@ -68,7 +68,7 @@ func StartProxyWithOptions(
 		recorder.WithMatcher(matcher),
 		recorder.WithSkipRequestLatency(true),
 		recorder.WithHook(RemoveHeadersHook, recorder.AfterCaptureHook),
-		recorder.WithReplayableInteractions(true),
+		recorder.WithReplayableInteractions(false), // Each cassette entry consumed once
 	)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create VCR recorder: %w", err)
@@ -96,20 +96,49 @@ func RemoveHeadersHook(i *cassette.Interaction) error {
 	return nil
 }
 
-// CustomMatcher creates a matcher that normalizes tool call IDs for consistent matching.
+// extractFirstUserMessage extracts the first user message text from a request body.
+func extractFirstUserMessage(body string) string {
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"messages"`
+	}
+
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		return ""
+	}
+
+	// Extract text from the FIRST user message only
+	for _, msg := range req.Messages {
+		if msg.Role != "user" {
+			continue
+		}
+
+		switch content := msg.Content.(type) {
+		case string:
+			return content
+		case []any:
+			for _, block := range content {
+				if blockMap, ok := block.(map[string]any); ok {
+					if text, ok := blockMap["text"].(string); ok {
+						return text
+					}
+				}
+			}
+		}
+		break // Only first user message
+	}
+
+	return ""
+}
+
+// CustomMatcher creates a matcher that compares only the first user message.
 // The onError callback is called if reading the request body fails (nil logs and returns false).
 func CustomMatcher(onError func(err error)) recorder.MatcherFunc {
-	callIDRegex := regexp.MustCompile(`call_[a-z0-9\-]+`)
-
 	return func(r *http.Request, i cassette.Request) bool {
 		if r.Body == nil || r.Body == http.NoBody {
 			return cassette.DefaultMatcher(r, i)
-		}
-		if r.Method != i.Method {
-			return false
-		}
-		if r.URL.String() != i.URL {
-			return false
 		}
 
 		reqBody, err := io.ReadAll(r.Body)
@@ -124,8 +153,17 @@ func CustomMatcher(onError func(err error)) recorder.MatcherFunc {
 		r.Body.Close()
 		r.Body = io.NopCloser(bytes.NewBuffer(reqBody))
 
-		// Normalize tool call IDs for matching
-		return callIDRegex.ReplaceAllString(string(reqBody), "call_ID") == callIDRegex.ReplaceAllString(i.Body, "call_ID")
+		// Extract first user message from both
+		reqMsg := extractFirstUserMessage(string(reqBody))
+		cassetteMsg := extractFirstUserMessage(i.Body)
+
+		// If both have user messages, compare them
+		if reqMsg != "" && cassetteMsg != "" {
+			return reqMsg == cassetteMsg
+		}
+
+		// Fallback to full body comparison for non-chat requests
+		return string(reqBody) == i.Body
 	}
 }
 
