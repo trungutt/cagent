@@ -157,3 +157,67 @@ type ResumeElicitationRequest struct {
 	Action  string         `json:"action"`  // "accept", "decline", or "cancel"
 	Content map[string]any `json:"content"` // The submitted form data (only present when action is "accept")
 }
+
+// ExportedSession represents a shareable session format with metadata.
+// This format is designed to be versioned and portable across different
+// cagent instances and can be shared via Docker Hub or other OCI registries.
+type ExportedSession struct {
+	// Version is the export format version for compatibility checking
+	Version string `json:"version"`
+	// ExportedAt is the timestamp when the session was exported
+	ExportedAt string `json:"exported_at"`
+	// Session contains the full session data
+	Session *session.Session `json:"session"`
+}
+
+// ExportSessionResponse represents the response from exporting a session
+type ExportSessionResponse struct {
+	// Data contains the exported session in shareable format
+	Data ExportedSession `json:"data"`
+}
+
+// PushSessionRequest represents a request to push a session to an OCI registry
+type PushSessionRequest struct {
+	// Reference is the OCI registry reference (e.g., "docker.io/user/sessions:my-session")
+	Reference string `json:"reference"`
+}
+
+// PushSessionResponse represents the response from pushing a session
+type PushSessionResponse struct {
+	// Reference is the full registry reference where the session was pushed
+	Reference string `json:"reference"`
+	// Digest is the content digest of the pushed artifact
+	Digest string `json:"digest"`
+}
+
+// PullSessionRequest represents a request to pull a session from an OCI registry
+type PullSessionRequest struct {
+	// Reference is the OCI registry reference to pull from
+	Reference string `json:"reference"`
+}
+
+// PullSessionResponse represents the response from pulling a session
+type PullSessionResponse struct {
+	// Reference is the registry reference that was pulled
+	Reference string `json:"reference"`
+	// Digest is the content digest of the pulled artifact
+	Digest string `json:"digest"`
+	// Message provides status information
+	Message string `json:"message"`
+}
+
+// ImportSessionRequest represents a request to import a session from the content store
+type ImportSessionRequest struct {
+	// Reference is the content store reference to import from (set after pulling)
+	Reference string `json:"reference"`
+}
+
+// ImportSessionResponse represents the response from importing a session
+type ImportSessionResponse struct {
+	// ID is the new session ID assigned to the imported session
+	ID string `json:"id"`
+	// Title is the title of the imported session
+	Title string `json:"title"`
+	// Message provides status information about the import
+	Message string `json:"message"`
+}
