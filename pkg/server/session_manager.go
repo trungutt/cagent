@@ -276,6 +276,11 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 func (sm *SessionManager) loadTeam(ctx context.Context, agentFilename string, runConfig *config.RuntimeConfig) (*team.Team, error) {
 	agentSource, found := sm.Sources[agentFilename]
 	if !found {
+		// Fallback: try without extension (for local files keyed without .yaml)
+		nameWithoutExt := strings.TrimSuffix(agentFilename, filepath.Ext(agentFilename))
+		agentSource, found = sm.Sources[nameWithoutExt]
+	}
+	if !found {
 		return nil, fmt.Errorf("agent not found: %s", agentFilename)
 	}
 
