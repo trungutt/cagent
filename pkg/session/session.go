@@ -628,12 +628,52 @@ func (s *Session) GetMessages(a *agent.Agent) []chat.Message {
 
 	startIndex := lastSummaryIndex + 1
 
+	// Collect tool call IDs from other agents' assistant messages so we can
+	// strip both the calls and their corresponding tool-role responses.
+	// This prevents the current agent's LLM from seeing other agents' tool
+	// usage patterns in the conversation history and hallucinating those
+	// same tool calls.
+	otherAgentToolCallIDs := make(map[string]bool)
+	for i := startIndex; i < len(s.Messages); i++ {
+		item := s.Messages[i]
+		if !item.IsMessage() {
+			continue
+		}
+		msg := item.Message
+		if msg.Message.Role == chat.MessageRoleAssistant && msg.AgentName != "" && msg.AgentName != a.Name() {
+			for _, tc := range msg.Message.ToolCalls {
+				otherAgentToolCallIDs[tc.ID] = true
+			}
+		}
+	}
+
 	// Begin adding conversation messages
 	for i := startIndex; i < len(s.Messages); i++ {
 		item := s.Messages[i]
-		if item.IsMessage() {
-			messages = append(messages, item.Message.Message)
+		if !item.IsMessage() {
+			continue
 		}
+
+		msg := item.Message.Message
+
+		// Skip tool responses that belong to another agent's tool calls
+		if msg.Role == chat.MessageRoleTool && otherAgentToolCallIDs[msg.ToolCallID] {
+			continue
+		}
+
+		// For assistant messages from other agents, strip tool calls so the
+		// current agent only sees the text content (not the tool usage patterns)
+		if msg.Role == chat.MessageRoleAssistant && item.Message.AgentName != "" && item.Message.AgentName != a.Name() {
+			if len(msg.ToolCalls) > 0 {
+				cleaned := msg
+				cleaned.ToolCalls = nil
+				cleaned.ToolDefinitions = nil
+				messages = append(messages, cleaned)
+				continue
+			}
+		}
+
+		messages = append(messages, msg)
 	}
 
 	maxItems := a.NumHistoryItems()
