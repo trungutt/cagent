@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -629,10 +630,11 @@ func (s *Session) GetMessages(a *agent.Agent) []chat.Message {
 	startIndex := lastSummaryIndex + 1
 
 	// Collect tool call IDs from other agents' assistant messages so we can
-	// strip both the calls and their corresponding tool-role responses.
-	// This prevents the current agent's LLM from seeing other agents' tool
-	// usage patterns in the conversation history and hallucinating those
-	// same tool calls.
+	// convert both the calls and their corresponding tool-role responses into
+	// narrative user messages. This prevents the current agent's LLM from seeing
+	// other agents' tool usage as structured tool calls it could mimic.
+	// Inspired by Google ADK's approach: tool calls become plain text attributed
+	// to the originating agent, presented as "user" role context.
 	otherAgentToolCallIDs := make(map[string]bool)
 	for i := startIndex; i < len(s.Messages); i++ {
 		item := s.Messages[i]
@@ -656,21 +658,21 @@ func (s *Session) GetMessages(a *agent.Agent) []chat.Message {
 
 		msg := item.Message.Message
 
-		// Skip tool responses that belong to another agent's tool calls
+		// Convert tool responses from other agents into narrative user messages
 		if msg.Role == chat.MessageRoleTool && otherAgentToolCallIDs[msg.ToolCallID] {
+			if msg.Content != "" {
+				messages = append(messages, presentOtherAgentToolResponse(msg))
+			}
 			continue
 		}
 
-		// For assistant messages from other agents, strip tool calls so the
-		// current agent only sees the text content (not the tool usage patterns)
+		// Convert other agents' assistant messages into narrative user messages
+		// so the current agent sees what happened without structured tool calls
 		if msg.Role == chat.MessageRoleAssistant && item.Message.AgentName != "" && item.Message.AgentName != a.Name() {
-			if len(msg.ToolCalls) > 0 {
-				cleaned := msg
-				cleaned.ToolCalls = nil
-				cleaned.ToolDefinitions = nil
-				messages = append(messages, cleaned)
-				continue
+			if converted := presentOtherAgentMessage(item.Message.AgentName, msg); converted != nil {
+				messages = append(messages, *converted)
 			}
+			continue
 		}
 
 		messages = append(messages, msg)
@@ -702,6 +704,40 @@ func (s *Session) GetMessages(a *agent.Agent) []chat.Message {
 		"max_history_items", maxItems)
 
 	return messages
+}
+
+// presentOtherAgentMessage converts another agent's assistant message into a
+// narrative user-role message. Tool calls become plain text descriptions so the
+// current agent sees what happened without structured tool call objects it could
+// mimic. Returns nil if the message has no meaningful content after conversion.
+func presentOtherAgentMessage(agentName string, msg chat.Message) *chat.Message {
+	var parts []string
+
+	if msg.Content != "" {
+		parts = append(parts, fmt.Sprintf("[%s] said: %s", agentName, msg.Content))
+	}
+
+	for _, tc := range msg.ToolCalls {
+		parts = append(parts, fmt.Sprintf("[%s] called tool `%s` with parameters: %s", agentName, tc.Function.Name, tc.Function.Arguments))
+	}
+
+	if len(parts) == 0 {
+		return nil
+	}
+
+	return &chat.Message{
+		Role:    chat.MessageRoleUser,
+		Content: "For context:\n" + strings.Join(parts, "\n"),
+	}
+}
+
+// presentOtherAgentToolResponse converts a tool-role response from another
+// agent's tool call into a narrative user-role message with the tool result.
+func presentOtherAgentToolResponse(msg chat.Message) chat.Message {
+	return chat.Message{
+		Role:    chat.MessageRoleUser,
+		Content: fmt.Sprintf("For context:\nTool returned result: %s", msg.Content),
+	}
 }
 
 // trimMessages ensures we don't exceed the maximum number of messages while maintaining
