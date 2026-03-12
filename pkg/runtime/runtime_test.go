@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace"
@@ -1960,6 +1961,93 @@ func TestResolveSessionAgent_InvalidNameFallsBack(t *testing.T) {
 	resolved := rt.resolveSessionAgent(sess)
 	require.NotNil(t, resolved, "should never return nil")
 	assert.Equal(t, "root", resolved.Name(), "should fall back to currentAgent for unknown AgentName")
+}
+
+// TestElicitationChannelNotStaleAfterToolsApprovedMutation verifies that the
+// elicitation events channel is properly cleared at stream teardown even when
+// sess.ToolsApproved is mutated from false→true during the stream (e.g. via
+// "approve all"). Before the fix, finalizeEventChannel would re-read
+// sess.ToolsApproved at teardown time and, finding it true, skip clearing the
+// channel reference — leaving a stale pointer to a closed channel. The next
+// stream's elicitation handler would then send on that closed channel and panic.
+// TestElicitationChannelNotStaleAfterToolsApprovedMutation verifies that:
+//  1. The elicitation channel is always properly cleaned up at stream teardown,
+//     preventing send-on-closed-channel panics.
+//  2. Stream 2 can successfully elicit even when sess.ToolsApproved was mutated
+//     to true during stream 1, because the channel is unconditionally set for
+//     every stream.
+func TestElicitationChannelNotStaleAfterToolsApprovedMutation(t *testing.T) {
+	prov := &mockProvider{id: "test/mock-model", stream: &mockStream{}}
+	root := agent.New("root", "You are a test agent", agent.WithModel(prov))
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	sess := session.New(session.WithUserMessage("Test"))
+	require.False(t, sess.ToolsApproved, "session should start with ToolsApproved=false")
+
+	// --- Stream 1: simulates a stream where ToolsApproved flips to true mid-stream ---
+
+	events1 := make(chan Event, 128)
+
+	// Setup: unconditionally set the elicitation channel.
+	rt.setElicitationEventsChannel(events1)
+
+	// During the stream, a tool confirmation causes "approve all" which flips the flag.
+	sess.ToolsApproved = true
+
+	// Teardown: finalizeEventChannel unconditionally clears the channel.
+	rt.finalizeEventChannel(t.Context(), sess, events1)
+
+	// events1 should now be closed. Drain it.
+	for range events1 {
+	}
+
+	// The elicitation channel reference must be nil after teardown.
+	rt.elicitationEventsChannelMux.RLock()
+	ch := rt.elicitationEventsChannel
+	rt.elicitationEventsChannelMux.RUnlock()
+	assert.Nil(t, ch, "elicitation events channel should be nil after stream 1 teardown")
+
+	// --- Stream 2: new stream with ToolsApproved=true (from the mutation) ---
+	// The channel is unconditionally set for every stream, so elicitation works.
+
+	events2 := make(chan Event, 128)
+
+	// Setup: unconditionally set the channel (same as RunStream does now).
+	rt.setElicitationEventsChannel(events2)
+
+	// Verify that elicitationHandler can successfully send on the new channel
+	// instead of panicking on a stale closed channel.
+	assert.NotPanics(t, func() {
+		// Use a short-lived context so the handler's response-wait unblocks.
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		defer cancel()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			// Drain the elicitation request event from events2.
+			ev := <-events2
+			assert.NotNil(t, ev, "should receive elicitation request event")
+		}()
+
+		_, err := rt.elicitationHandler(ctx, &mcp.ElicitParams{
+			ElicitationID: "test-elicit-2",
+			Message:       "pick one",
+		})
+		// The handler returns context.DeadlineExceeded because we don't
+		// send a response. The key assertion is that it does NOT panic and
+		// that the send on events2 succeeded (verified in the goroutine).
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		<-done
+	}, "elicitationHandler must not panic on stream 2")
+
+	// Teardown stream 2.
+	rt.finalizeEventChannel(t.Context(), sess, events2)
+	for range events2 {
+	}
 }
 
 // TestProcessToolCalls_UsesPinnedAgent verifies that tool-call events emitted by
